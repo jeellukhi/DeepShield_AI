@@ -1,0 +1,37 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+.env.production
+
+# Node
+node_modules/
+dist/
+build/
+coverage/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# ML datasets (too large for GitHub ~3.8GB)
+ml/datasets/
+
+# Trained model binaries (use Git LFS or share separately if needed)
+ml/models/*.pkl
+ml/models/*.joblib
+ml/models/*.h5
+ml/models/*.pt
+ml/models/*.pth
+ml/models/*.onnx
+
+# Logs & temp
+*.log
+*.tmp
+*.swp
+
+# IDE
+.vscode/
+.idea/
