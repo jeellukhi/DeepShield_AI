@@ -733,7 +733,15 @@ def _engagement_score(followers: int, following: int, posts: int, engagement_rat
 def analyze_profile(payload: ProfileAnalyzeRequest, current_user: dict = Depends(require_authenticated_user)):
     heuristic_profile_score, profile_factors = _profile_text_score(payload.username, payload.bio)
     profile_score = heuristic_profile_score
-    profile_model = predict_profile_text_authenticity(payload.username, payload.bio)
+    profile_model = predict_profile_text_authenticity(
+        payload.username,
+        payload.bio,
+        followers=payload.followers,
+        following=payload.following,
+        posts=payload.posts,
+        engagement_rate=payload.engagement_rate,
+        image_score=payload.image_score,
+    )
     profile_model_source = "heuristic"
     profile_model_weight = 0.0
     profile_heuristic_weight = 1.0

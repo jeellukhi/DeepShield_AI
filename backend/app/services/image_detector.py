@@ -60,8 +60,9 @@ def _predict_with_trained_model(image: np.ndarray) -> dict | None:
         return None
 
     model = artifact.get("model")
+    model_cal = artifact.get("model_calibration")  # new calibration ensemble partner
     input_size = int(artifact.get("input_size", 64))
-    feature_mode = str(artifact.get("feature_mode", "v1_grayscale"))
+    feature_mode = str(artifact.get("feature_mode", "v3_multicue_stack"))
     raw_artifact_threshold = float(artifact.get("decision_threshold", 0.5))
     artifact_threshold_pct = raw_artifact_threshold * 100.0 if raw_artifact_threshold <= 1.0 else raw_artifact_threshold
     threshold_cfg = get_effective_thresholds()
@@ -75,14 +76,26 @@ def _predict_with_trained_model(image: np.ndarray) -> dict | None:
     try:
         x = extract_image_feature(image, input_size, feature_mode=feature_mode).reshape(1, -1)
         if hasattr(model, "predict_proba"):
-            fake_probability = float(model.predict_proba(x)[0][1]) * 100.0
+            prob_main = float(model.predict_proba(x)[0][1])
         else:
-            fake_probability = float(model.predict(x)[0]) * 100.0
+            prob_main = float(model.predict(x)[0])
+
+        # Blend with calibration model if available
+        if model_cal is not None and hasattr(model_cal, "predict_proba"):
+            weights = artifact.get("ensemble_weights", {"main": 0.75, "calibration": 0.25})
+            prob_cal = float(model_cal.predict_proba(x)[0][1])
+            fake_prob_raw = (
+                weights.get("main", 0.75) * prob_main
+                + weights.get("calibration", 0.25) * prob_cal
+            )
+        else:
+            fake_prob_raw = prob_main
+
+        fake_probability = round(max(0.0, min(100.0, fake_prob_raw * 100.0)), 2)
     except Exception:
         return None
 
     authenticity_score = round(max(0.0, min(100.0, 100.0 - fake_probability)), 2)
-    fake_probability = round(max(0.0, min(100.0, fake_probability)), 2)
     label = "Real-like" if fake_probability < (decision_threshold * 100.0) else "Fake-like"
 
     return {
