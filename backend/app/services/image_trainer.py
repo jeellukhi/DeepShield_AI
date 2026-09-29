@@ -6,7 +6,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score, balanced_accuracy_score, f1_score,
@@ -15,7 +15,6 @@ from sklearn.metrics import (
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.svm import SVC
 
 from app.services.image_features import augment_image, extract_image_feature, is_usable_image
 
@@ -45,7 +44,10 @@ def _load_base_samples(
     labels: list[int] = []
     used_paths: list[str] = []
     skipped = 0
-    for path in image_paths:
+    total = len(image_paths)
+    for i, path in enumerate(image_paths):
+        if i > 0 and i % 500 == 0:
+            print(f"      {i}/{total} images processed...", flush=True)
         image = cv2.imread(str(path))
         if not is_usable_image(image, min_side=min_side):
             skipped += 1
@@ -93,7 +95,11 @@ def _augment_training_features(
     else:
         x_aug = np.empty((0, 0), dtype=np.float32)
         y_aug = np.empty((0,), dtype=np.int32)
-    return x_aug, y_aug, {"augmented_real": augmented_real, "augmented_fake": augmented_fake, "augment_failures": augment_failures}
+    return x_aug, y_aug, {
+        "augmented_real": augmented_real,
+        "augmented_fake": augmented_fake,
+        "augment_failures": augment_failures,
+    }
 
 
 def _best_threshold(y_true: np.ndarray, fake_probs: np.ndarray) -> tuple[float, float]:
@@ -108,7 +114,7 @@ def _best_threshold(y_true: np.ndarray, fake_probs: np.ndarray) -> tuple[float, 
     return best_threshold, best_f1
 
 
-def train_image_model(max_per_class: int = 5000, input_size: int = 64, test_size: float = 0.2) -> dict:
+def train_image_model(max_per_class: int = 3000, input_size: int = 64, test_size: float = 0.2) -> dict:
     if max_per_class < 50:
         raise ValueError("max_per_class must be at least 50.")
     feature_mode = "v3_multicue_stack"
@@ -121,14 +127,25 @@ def train_image_model(max_per_class: int = 5000, input_size: int = 64, test_size
         raise ValueError("Dataset folders not found. Expected real/ and fake/ inside ml/datasets/deepfake_images/.")
 
     rng = np.random.default_rng(42)
-    augment_per_image = 1 if max_per_class <= 5000 else 0
-    augment_fraction = 0.5 if max_per_class <= 5000 else 0.0
+    augment_per_image = 1
+    augment_fraction = 0.35  # augment 35% of training images
 
+    print(f"[1/6] Collecting paths (max {max_per_class}/class)...", flush=True)
     real_paths, real_total_found = _collect_image_paths(real_dir, max_per_class, rng)
     fake_paths, fake_total_found = _collect_image_paths(fake_dir, max_per_class, rng)
+    print(f"      {len(real_paths)} real + {len(fake_paths)} fake paths", flush=True)
 
-    real_x, real_y, real_used_paths, real_skipped = _load_base_samples(real_paths, 0, input_size, feature_mode)
-    fake_x, fake_y, fake_used_paths, fake_skipped = _load_base_samples(fake_paths, 1, input_size, feature_mode)
+    print(f"[2/6] Extracting real image features...", flush=True)
+    real_x, real_y, real_used_paths, real_skipped = _load_base_samples(
+        real_paths, 0, input_size, feature_mode
+    )
+    print(f"      {len(real_x)} valid ({real_skipped} skipped)", flush=True)
+
+    print(f"[3/6] Extracting fake image features...", flush=True)
+    fake_x, fake_y, fake_used_paths, fake_skipped = _load_base_samples(
+        fake_paths, 1, input_size, feature_mode
+    )
+    print(f"      {len(fake_x)} valid ({fake_skipped} skipped)", flush=True)
 
     if len(real_x) < 50 or len(fake_x) < 50:
         raise ValueError("Need at least 50 valid images in both real and fake classes.")
@@ -142,7 +159,7 @@ def train_image_model(max_per_class: int = 5000, input_size: int = 64, test_size
         test_size=test_size, random_state=42, stratify=y_base,
     )
 
-    # Augment training data only
+    print(f"[4/6] Augmenting {int(len(y_train_base)*augment_fraction)} training images...", flush=True)
     x_aug_full, y_aug_full, aug_stats = _augment_training_features(
         train_paths, y_train_base, input_size, feature_mode,
         rng, augment_per_image, augment_fraction,
@@ -154,34 +171,27 @@ def train_image_model(max_per_class: int = 5000, input_size: int = 64, test_size
         x_train_final = x_train_base
         y_train_final = y_train_base
 
-    # ── Candidate models ────────────────────────────────────────────────────
+    n_feat = x_train_final.shape[1]
+    print(f"      Train: {x_train_final.shape}, Test: {x_test.shape}, Features: {n_feat}", flush=True)
+
+    # ── Candidate models (RandomForest with n_jobs=-1 uses all CPU cores) ──
     candidates = [
         {
             "name": "random_forest",
             "pipeline": Pipeline([
                 ("scale", StandardScaler()),
                 ("clf", RandomForestClassifier(
-                    n_estimators=300, max_depth=12, min_samples_leaf=2,
+                    n_estimators=150, max_depth=10, min_samples_leaf=3,
                     class_weight="balanced", random_state=42, n_jobs=-1,
                 )),
             ]),
         },
         {
-            "name": "gradient_boosting",
-            "pipeline": Pipeline([
-                ("scale", StandardScaler()),
-                ("clf", GradientBoostingClassifier(
-                    n_estimators=200, max_depth=5, learning_rate=0.08,
-                    min_samples_leaf=3, subsample=0.85, random_state=42,
-                )),
-            ]),
-        },
-        {
-            "name": "logreg_scaled",
+            "name": "logreg_lbfgs",
             "pipeline": Pipeline([
                 ("scale", StandardScaler()),
                 ("clf", LogisticRegression(
-                    max_iter=1000, solver="lbfgs",
+                    max_iter=800, solver="lbfgs",
                     class_weight="balanced", C=1.0, random_state=42,
                 )),
             ]),
@@ -197,16 +207,19 @@ def train_image_model(max_per_class: int = 5000, input_size: int = 64, test_size
     min_train_class = int(min(np.bincount(y_train_final))) if len(y_train_final) > 0 else 0
     use_val_split = len(y_train_final) >= 100 and min_train_class >= 20
 
+    print(f"[5/6] Training & selecting best model (val_split={use_val_split})...", flush=True)
     if use_val_split:
         x_tr, x_val, y_tr, y_val = train_test_split(
             x_train_final, y_train_final,
             test_size=0.15, random_state=42, stratify=y_train_final,
         )
         for candidate in candidates:
+            print(f"      Fitting {candidate['name']}...", flush=True)
             m = candidate["pipeline"]
             m.fit(x_tr, y_tr)
             val_probs = m.predict_proba(x_val)[:, 1]
             threshold, val_f1 = _best_threshold(y_val, val_probs)
+            print(f"      {candidate['name']} val_f1={round(val_f1*100,2)}%", flush=True)
             if val_f1 > best_val_f1:
                 best_val_f1 = val_f1
                 best_threshold = threshold
@@ -218,22 +231,25 @@ def train_image_model(max_per_class: int = 5000, input_size: int = 64, test_size
         best_val_f1 = float("nan")
 
     assert best_model is not None
+    print(f"      Best model: {best_name}", flush=True)
 
-    # ── Train best model on full training set ────────────────────────────────
+    # ── Retrain best model on full training set ──────────────────────────────
+    print(f"[6/6] Retraining {best_name} on full training set...", flush=True)
     best_model.fit(x_train_final, y_train_final)
 
-    # ── Ensemble: best_model + logreg for calibration ────────────────────────
-    # Train a simple logreg on the same data for soft blending
+    # ── Calibration blend: best_model (80%) + logreg (20%) ──────────────────
     logreg_cal = Pipeline([
         ("scale", StandardScaler()),
-        ("clf", LogisticRegression(max_iter=600, solver="liblinear", class_weight="balanced", C=0.8, random_state=42)),
+        ("clf", LogisticRegression(
+            max_iter=600, solver="liblinear",
+            class_weight="balanced", C=0.8, random_state=42,
+        )),
     ])
     logreg_cal.fit(x_train_final, y_train_final)
 
-    # Ensemble probabilities on test set
     test_probs_main = best_model.predict_proba(x_test)[:, 1]
     test_probs_lr = logreg_cal.predict_proba(x_test)[:, 1]
-    test_probs_ensemble = 0.75 * test_probs_main + 0.25 * test_probs_lr
+    test_probs_ensemble = 0.80 * test_probs_main + 0.20 * test_probs_lr
 
     y_pred = (test_probs_ensemble >= best_threshold).astype(np.int32)
     tn = int(np.sum((y_test == 0) & (y_pred == 0)))
@@ -249,6 +265,7 @@ def train_image_model(max_per_class: int = 5000, input_size: int = 64, test_size
         "f1_score": round(float(f1_score(y_test, y_pred, zero_division=0)) * 100, 2),
         "roc_auc": round(float(roc_auc_score(y_test, test_probs_ensemble)) * 100, 2),
     }
+    print(f"DONE! Metrics: {metrics}", flush=True)
 
     models_dir = project_root / "ml" / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -257,7 +274,7 @@ def train_image_model(max_per_class: int = 5000, input_size: int = 64, test_size
     artifact = {
         "model": best_model,
         "model_calibration": logreg_cal,
-        "ensemble_weights": {"main": 0.75, "calibration": 0.25},
+        "ensemble_weights": {"main": 0.80, "calibration": 0.20},
         "input_size": input_size,
         "feature_mode": feature_mode,
         "model_type": best_name,
@@ -273,10 +290,14 @@ def train_image_model(max_per_class: int = 5000, input_size: int = 64, test_size
             **aug_stats,
         },
         "dataset_summary": {
-            "real_total_found": real_total_found, "fake_total_found": fake_total_found,
-            "real_sampled_paths": len(real_paths), "fake_sampled_paths": len(fake_paths),
-            "real_valid_base": len(real_x), "fake_valid_base": len(fake_x),
-            "real_skipped": real_skipped, "fake_skipped": fake_skipped,
+            "real_total_found": real_total_found,
+            "fake_total_found": fake_total_found,
+            "real_sampled_paths": len(real_paths),
+            "fake_sampled_paths": len(fake_paths),
+            "real_valid_base": len(real_x),
+            "fake_valid_base": len(fake_x),
+            "real_skipped": real_skipped,
+            "fake_skipped": fake_skipped,
         },
     }
 
@@ -289,7 +310,8 @@ def train_image_model(max_per_class: int = 5000, input_size: int = 64, test_size
         "dataset_used": {
             "real_count": len(real_x), "fake_count": len(fake_x),
             "total_count": len(real_x) + len(fake_x),
-            "real_total_found": real_total_found, "fake_total_found": fake_total_found,
+            "real_total_found": real_total_found,
+            "fake_total_found": fake_total_found,
             "real_augmented": aug_stats["augmented_real"],
             "fake_augmented": aug_stats["augmented_fake"],
         },
