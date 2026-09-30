@@ -62,7 +62,7 @@ def _predict_with_trained_model(image: np.ndarray) -> dict | None:
     model = artifact.get("model")
     model_cal = artifact.get("model_calibration")  # new calibration ensemble partner
     input_size = int(artifact.get("input_size", 64))
-    feature_mode = str(artifact.get("feature_mode", "v3_multicue_stack"))
+    feature_mode = str(artifact.get("feature_mode", "v4_lbp_ela"))
     raw_artifact_threshold = float(artifact.get("decision_threshold", 0.5))
     artifact_threshold_pct = raw_artifact_threshold * 100.0 if raw_artifact_threshold <= 1.0 else raw_artifact_threshold
     threshold_cfg = get_effective_thresholds()

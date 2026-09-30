@@ -117,7 +117,7 @@ def _best_threshold(y_true: np.ndarray, fake_probs: np.ndarray) -> tuple[float, 
 def train_image_model(max_per_class: int = 3000, input_size: int = 64, test_size: float = 0.2) -> dict:
     if max_per_class < 50:
         raise ValueError("max_per_class must be at least 50.")
-    feature_mode = "v3_multicue_stack"
+    feature_mode = "v4_lbp_ela"
 
     project_root = _project_root()
     real_dir = project_root / "ml" / "datasets" / "deepfake_images" / "real"
