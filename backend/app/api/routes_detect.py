@@ -34,6 +34,11 @@ from app.services.image_detector import analyze_image_authenticity
 from app.services.dataset_manager import import_labeled_images_zip, save_labeled_image
 from app.services.dataset_quality import get_dataset_quality_report
 from app.services.image_trainer import train_image_model
+try:
+    from app.services.cnn_trainer import train_cnn_model as _train_cnn_model
+    _CNN_AVAILABLE = True
+except ImportError:
+    _CNN_AVAILABLE = False
 from app.services.profile_detector import predict_profile_text_authenticity
 from app.services.profile_trainer import train_profile_model
 from app.services.model_evaluation import evaluate_image_model, evaluate_profile_model
@@ -342,12 +347,18 @@ def security_status(request: Request, admin_user: dict = Depends(require_admin_u
 @router.post("/model/train-image")
 def train_image_model_route(
     request: Request,
-    max_per_class: int = 2000,
+    max_per_class: int = 3000,
+    use_cnn: bool = True,
     admin_user: dict = Depends(require_admin_user),
 ):
     safe_max_per_class = max(50, min(max_per_class, 20000))
+    # Prefer CNN (EfficientNet) when PyTorch is installed, otherwise sklearn
+    use_cnn_actual = use_cnn and _CNN_AVAILABLE
     try:
-        result = train_image_model(max_per_class=safe_max_per_class)
+        if use_cnn_actual:
+            result = _train_cnn_model(max_per_class=safe_max_per_class)
+        else:
+            result = train_image_model(max_per_class=safe_max_per_class)
     except ValueError as exc:
         _write_audit_event(
             actor_username=admin_user["username"],
