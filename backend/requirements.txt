@@ -9,3 +9,9 @@ pymongo==4.8.0
 python-dotenv==1.0.1
 reportlab==4.2.5
 PyJWT==2.10.1
+
+# Deep Learning - GPU accelerated CNN training
+# Install with: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# (CUDA 12.4 for NVIDIA GPU - adjust URL for your CUDA version)
+torch>=2.6.0
+torchvision>=0.21.0
