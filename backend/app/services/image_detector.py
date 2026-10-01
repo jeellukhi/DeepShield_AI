@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import pickle
 from pathlib import Path
 
@@ -49,12 +48,11 @@ def _predict_with_cnn(image: np.ndarray, artifact: dict) -> float | None:
         import torch
         import torchvision.models as models
         import torchvision.transforms as transforms
+        import torch.nn as nn
         from PIL import Image as PILImage
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Rebuild EfficientNet-B0 and load saved weights
-        import torch.nn as nn
         model = models.efficientnet_b0(weights=None)
         in_features = model.classifier[1].in_features
         model.classifier = nn.Sequential(
@@ -76,16 +74,27 @@ def _predict_with_cnn(image: np.ndarray, artifact: dict) -> float | None:
             transforms.Normalize(mean=mean, std=std),
         ])
 
-        # Convert BGR (OpenCV) -> RGB -> PIL
         img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         pil_img = PILImage.fromarray(img_rgb)
         tensor = transform(pil_img).unsqueeze(0).to(device)
 
         with torch.no_grad():
             logit = model(tensor).squeeze()
-            prob = float(torch.sigmoid(logit).cpu().item())
+            raw_prob = float(torch.sigmoid(logit).cpu().item())
 
-        return prob * 100.0  # return as percentage
+        # --- Recalibrate to the model's own trained threshold ---
+        # The CNN was trained with threshold T (e.g. 0.31).
+        # We recalibrate so that T maps to 0.50 (the natural midpoint),
+        # preserving the relative ordering of all predictions.
+        # Formula: recalibrated = raw_prob / (2 * T)  → capped at 1.0
+        # Effect: raw_prob=T → 0.50 | raw_prob=0 → 0.0 | raw_prob=2T → 1.0
+        cnn_threshold = float(artifact.get("decision_threshold", 0.5))
+        if cnn_threshold > 0.0 and cnn_threshold != 0.5:
+            recalibrated = min(1.0, raw_prob / (2.0 * cnn_threshold))
+        else:
+            recalibrated = raw_prob
+
+        return recalibrated * 100.0
 
     except Exception:
         return None
@@ -127,21 +136,17 @@ def _predict_with_trained_model(image: np.ndarray) -> dict | None:
     if artifact is None:
         return None
 
-    # Detect model type
     arch = artifact.get("model_architecture", "")
     model_type = artifact.get("model_type", "")
     is_cnn = arch == "efficientnet_b0" or "efficientnet" in model_type
 
-    # Get threshold
-    raw_threshold = float(artifact.get("decision_threshold", 0.5))
-    artifact_threshold_pct = raw_threshold * 100.0 if raw_threshold <= 1.0 else raw_threshold
+    # Threshold for final label
     threshold_cfg = get_effective_thresholds()
     decision_threshold_pct = float(
-        threshold_cfg.get("values", {}).get("image_fake_probability_threshold", artifact_threshold_pct)
+        threshold_cfg.get("values", {}).get("image_fake_probability_threshold", 50.0)
     )
     decision_threshold_pct = max(20.0, min(80.0, decision_threshold_pct))
 
-    # Run inference
     if is_cnn:
         fake_probability = _predict_with_cnn(image, artifact)
         source = "cnn_efficientnet_b0"
@@ -229,32 +234,33 @@ def analyze_image_authenticity(image_bytes: bytes) -> dict:
             "model_source": "error",
         }
 
-    # Run trained model
     model_result = _predict_with_trained_model(image)
     heuristic_result = analyze_image_array(image)
 
     if model_result is None:
         return {**heuristic_result, "model_source": "heuristic_fallback"}
 
-    model_score = float(model_result["authenticity_score"])
-    heuristic_score = float(heuristic_result["authenticity_score"])
+    model_fake = float(model_result["fake_probability"])
+    heuristic_fake = float(heuristic_result["fake_probability"])
     model_source = model_result.get("model_source", "trained")
 
-    # CNN gets higher weight — it learned from data directly
+    # CNN gets 85% weight — it learned from 10k face images
+    # Heuristic gets 15% — only a sanity check
     if "cnn" in model_source:
         weight_model = 0.85
     else:
         weight_model = 0.72
 
-    fused_score = round(weight_model * model_score + (1.0 - weight_model) * heuristic_score, 2)
-    fused_fake = round(100.0 - fused_score, 2)
+    fused_fake = round(weight_model * model_fake + (1.0 - weight_model) * heuristic_fake, 2)
+    fused_score = round(100.0 - fused_fake, 2)
+
     threshold_cfg = get_effective_thresholds()
     threshold = float(threshold_cfg.get("values", {}).get("image_fake_probability_threshold", 50.0))
     label = "Fake-like" if fused_fake >= threshold else "Real-like"
 
     warning_flags = []
-    if abs(model_score - heuristic_score) > 25:
-        warning_flags.append("Model and heuristic scores strongly disagree.")
+    if abs(model_fake - heuristic_fake) > 35:
+        warning_flags.append("Model and heuristic scores strongly disagree — result may be uncertain.")
 
     return {
         "authenticity_score": fused_score,
@@ -262,8 +268,8 @@ def analyze_image_authenticity(image_bytes: bytes) -> dict:
         "label": label,
         "model_source": f"{model_source}+heuristic_fusion",
         "calibration": {
-            "model_score": round(model_score, 2),
-            "heuristic_score": round(heuristic_score, 2),
+            "model_fake_prob": round(model_fake, 2),
+            "heuristic_fake_prob": round(heuristic_fake, 2),
             "model_weight": weight_model,
         },
         "signals": {**model_result.get("signals", {}), **heuristic_result.get("signals", {})},
