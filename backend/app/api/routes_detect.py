@@ -463,9 +463,28 @@ def model_evaluation(
     safe_profile = max(200, min(profile_max_samples, 20000))
     thresholds = get_effective_thresholds()
     values = thresholds.get("values", {})
+
+    # Use CNN's own stored threshold for image evaluation (not admin threshold)
+    # CNN was trained with threshold 0.31 — using 0.50 would show wrong accuracy
+    import pickle, os
+    _model_pkl = os.path.join(
+        os.path.dirname(__file__), "..", "..", "..", "ml", "models", "image_cnn.pkl"
+    )
+    _model_pkl = os.path.normpath(_model_pkl)
+    _cnn_threshold_pct = float(values.get("image_fake_probability_threshold", 50.0))
+    try:
+        if os.path.exists(_model_pkl):
+            with open(_model_pkl, "rb") as _f:
+                _art = pickle.load(_f)
+            _stored = _art.get("decision_threshold", 0.5)
+            # stored threshold <=1 means it's a raw probability (e.g. 0.31)
+            _cnn_threshold_pct = (_stored * 100.0) if _stored <= 1.0 else float(_stored)
+    except Exception:
+        pass
+
     image_eval = evaluate_image_model(
         max_per_class=safe_image,
-        threshold_pct=float(values.get("image_fake_probability_threshold", 50.0)),
+        threshold_pct=_cnn_threshold_pct,
     )
     profile_eval = evaluate_profile_model(
         max_samples=safe_profile,

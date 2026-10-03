@@ -1,5 +1,5 @@
 {
-  "image_fake_probability_threshold": 50.0,
-  "video_fake_probability_threshold": 55.0,
+  "image_fake_probability_threshold": 31.0,
+  "video_fake_probability_threshold": 45.0,
   "profile_fake_probability_threshold": 50.0
 }
