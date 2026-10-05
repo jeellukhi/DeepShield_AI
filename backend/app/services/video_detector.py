@@ -2,9 +2,54 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+from pathlib import Path
 
-from app.services.image_detector import analyze_image_array, analyze_image_frame
+from app.services.image_detector import analyze_image_array, analyze_image_frame, _load_model_artifact, _detect_face_region, _run_cnn_on_crop, _get_torch_model
 from app.services.model_thresholds import get_effective_thresholds
+
+
+def _load_video_model() -> dict | None:
+    """
+    Load a dedicated video deepfake model (trained on Celeb-DF) if available.
+    Falls back to the image model if video_cnn.pkl doesn't exist.
+    video_cnn.pkl is created by running cnn_trainer.py with:
+      dataset_root='ml/datasets/celebdf_faces', model_save_name='video_cnn.pkl'
+    """
+    import pickle
+    video_model_path = Path(__file__).resolve().parents[3] / "ml" / "models" / "video_cnn.pkl"
+    if video_model_path.exists():
+        try:
+            with video_model_path.open("rb") as f:
+                return pickle.load(f)
+        except Exception:
+            pass
+    return None  # Fall back to image model
+
+
+def _analyze_frame_with_model(frame: np.ndarray, artifact: dict | None) -> dict:
+    """Analyze a single video frame using available model (video or image CNN)."""
+    if artifact is None:
+        return analyze_image_frame(frame)
+
+    face_crop = _detect_face_region(frame)
+    if face_crop is None:
+        h = analyze_image_array(frame)
+        h["face_detected"] = False
+        return h
+
+    raw = _run_cnn_on_crop(face_crop, artifact)
+    if raw is None:
+        return analyze_image_frame(frame)
+
+    cnn_thresh = float(artifact.get("decision_threshold", 0.31))
+    fake_prob = round(raw * 100.0, 2)
+    return {
+        "authenticity_score": round(100.0 - fake_prob, 2),
+        "fake_probability": fake_prob,
+        "label": "Fake-like" if raw >= cnn_thresh else "Real-like",
+        "model_source": artifact.get("model_type", "cnn"),
+        "face_detected": True,
+    }
 
 
 def _temporal_consistency_score(frame_scores: list[float]) -> float:
@@ -31,6 +76,12 @@ def analyze_video_authenticity(video_path: str, max_frames: int = 64) -> dict:
     duration_sec = total_frames / max(fps, 1.0)
     frame_step = max(1, total_frames // max_frames) if total_frames > 0 else 1
 
+    # Try dedicated video model first (trained on Celeb-DF face-swap videos)
+    # Falls back to image model if video_cnn.pkl not yet trained
+    video_artifact = _load_video_model()
+    using_video_model = video_artifact is not None
+    model_label = "video_cnn_celebdf" if using_video_model else "image_cnn_efficientnet"
+
     frame_index = 0
     frame_scores: list[float] = []
     face_detected_count = 0
@@ -42,18 +93,18 @@ def analyze_video_authenticity(video_path: str, max_frames: int = 64) -> dict:
             break
 
         if frame_index % frame_step == 0:
-            result = analyze_image_frame(frame)
+            # Use dedicated video model if trained on Celeb-DF, else image model
+            result = _analyze_frame_with_model(frame, video_artifact)
             auth_score = float(result.get("authenticity_score", 50.0))
             face_found = result.get("face_detected", False)
             src = result.get("model_source", "unknown")
 
             if face_found:
-                # Face detected — CNN result is reliable
                 face_detected_count += 1
                 frame_scores.append(auth_score)
                 model_sources.add(src)
             else:
-                # No face — run heuristic only; CNN is unreliable on non-face frames
+                # No face in frame — use heuristic (works on any content)
                 heuristic = analyze_image_array(frame)
                 h_auth = float(heuristic.get("authenticity_score", 50.0))
                 frame_scores.append(h_auth)
@@ -89,9 +140,14 @@ def analyze_video_authenticity(video_path: str, max_frames: int = 64) -> dict:
     stability_index = round(max(0.0, min(100.0, 100.0 - score_std * 2.5)), 2)
 
     face_detection_rate = round(face_detected_count / max(len(frame_scores), 1) * 100.0, 1)
-    model_source_label = next(iter(model_sources)) if len(model_sources) == 1 else "mixed_cnn+heuristic"
+    model_source_label = model_label  # video_cnn_celebdf or image_cnn_efficientnet
 
     warning_flags: list[str] = []
+    if not using_video_model:
+        warning_flags.append(
+            "Using image model for video (no Celeb-DF trained model yet). "
+            "Train video_cnn.pkl on Celeb-DF for better face-swap detection."
+        )
     if face_detection_rate < 30:
         warning_flags.append(
             f"Only {face_detection_rate}% of frames had a detectable face. "

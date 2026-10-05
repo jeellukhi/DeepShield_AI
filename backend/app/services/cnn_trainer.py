@@ -81,26 +81,53 @@ def train_cnn_model(
     batch_size: int = 32,
     learning_rate: float = 1e-4,
     test_size: float = 0.15,
+    dataset_root: str | None = None,
+    model_save_name: str = "image_cnn.pkl",
 ) -> dict:
+    """
+    Train EfficientNet-B0 on a real/fake face dataset.
+
+    Args:
+        max_per_class:  Max images per class to use (0 = all).
+        epochs:         Training epochs.
+        batch_size:     Batch size (auto-reduced for CPU).
+        learning_rate:  AdamW learning rate.
+        test_size:      Fraction for test split.
+        dataset_root:   Path to folder containing real/ and fake/ subfolders.
+                        Defaults to ml/datasets/deepfake_images/.
+                        For Celeb-DF: point to your extracted frames folder.
+        model_save_name: Filename for saved pkl (default: image_cnn.pkl).
+    """
     # ── Setup ─────────────────────────────────────────────────────────────────
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Device] Using: {device}", flush=True)
     if device.type == "cuda":
         print(f"[Device] GPU: {torch.cuda.get_device_name(0)}, VRAM: {torch.cuda.get_device_properties(0).total_memory // 1024**2} MB", flush=True)
-        # For GTX 1650 (4GB VRAM), use batch_size=32 and AMP for memory efficiency
         use_amp = True
     else:
         use_amp = False
         batch_size = min(batch_size, 16)
 
     project_root = _project_root()
-    real_dir = project_root / "ml" / "datasets" / "deepfake_images" / "real"
-    fake_dir = project_root / "ml" / "datasets" / "deepfake_images" / "fake"
+
+    if dataset_root:
+        real_dir = Path(dataset_root) / "real"
+        fake_dir = Path(dataset_root) / "fake"
+    else:
+        real_dir = project_root / "ml" / "datasets" / "deepfake_images" / "real"
+        fake_dir = project_root / "ml" / "datasets" / "deepfake_images" / "fake"
 
     if not real_dir.exists() or not fake_dir.exists():
-        raise ValueError("Dataset folders not found. Expected real/ and fake/ inside ml/datasets/deepfake_images/.")
+        raise ValueError(
+            f"Dataset folders not found.\n"
+            f"Expected: {real_dir}\n"
+            f"      and: {fake_dir}\n"
+            f"Use dataset_root='<path>' pointing to a folder with real/ and fake/ subfolders."
+        )
 
+    print(f"[Dataset] {real_dir}", flush=True)
     rng = np.random.default_rng(42)
+
 
     # ── Collect paths ──────────────────────────────────────────────────────────
     print(f"[1/7] Collecting image paths (max {max_per_class}/class)...", flush=True)
@@ -320,7 +347,7 @@ def train_cnn_model(
     print(f"[6/7] Saving model...", flush=True)
     models_dir = project_root / "ml" / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
-    model_path = models_dir / "image_cnn.pkl"
+    model_path = models_dir / model_save_name
 
     # Move model to CPU for serialization
     model = model.cpu()
