@@ -187,11 +187,11 @@ def train_cnn_model(
 
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, sampler=sampler,
-        num_workers=2, pin_memory=(device.type == "cuda"),
+        num_workers=0, pin_memory=(device.type == "cuda"),
     )
     test_loader = DataLoader(
         test_dataset, batch_size=batch_size, shuffle=False,
-        num_workers=2, pin_memory=(device.type == "cuda"),
+        num_workers=0, pin_memory=(device.type == "cuda"),
     )
 
     # ── Model: EfficientNet-B0 with fine-tuned classifier ────────────────────
@@ -249,7 +249,7 @@ def train_cnn_model(
 
             optimizer.zero_grad()
             if use_amp:
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast("cuda"):
                     outputs = model(imgs).squeeze(1)
                     loss = criterion(outputs, lbls)
                 scaler.scale(loss).backward()
@@ -283,7 +283,7 @@ def train_cnn_model(
             for imgs, lbls in test_loader:
                 imgs = imgs.to(device, non_blocking=True)
                 if use_amp:
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast("cuda"):
                         outputs = model(imgs).squeeze(1)
                 else:
                     outputs = model(imgs).squeeze(1)
